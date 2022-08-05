@@ -88,16 +88,16 @@ void BufferPoolManagerInstance::UpdatePage(Page *page, page_id_t new_page_id, fr
 
 auto BufferPoolManagerInstance::FlushPgImp(page_id_t page_id) -> bool {
   // Make sure you call DiskManager::WritePage!
-  std::unique_lock<std::mutex> lock(latch_);
+  std::scoped_lock lock{latch_};
+
   auto iter = page_table_.find(page_id);
   if (iter == page_table_.end() || page_id == INVALID_PAGE_ID) {
-    latch_.unlock();
     return false;
   }
 
   frame_id_t flush_fid = iter->second;
   Page *page = &pages_[flush_fid];
-  disk_manager_->WritePage(page_id, page->data_);
+  disk_manager_->WritePage(page_id, page->GetData());
   page->is_dirty_ = false;
 
   return true;
@@ -106,13 +106,14 @@ auto BufferPoolManagerInstance::FlushPgImp(page_id_t page_id) -> bool {
 void BufferPoolManagerInstance::FlushAllPgsImp() {
   // You can do it!
   // std::unique_lock<std::mutex> lock(latch_);
-  std::unique_lock<std::mutex> lock(latch_);
+  std::scoped_lock lock{latch_};
 
-  for (size_t i = 0; i < pool_size_; i++) {
+  for (size_t fid = 0; fid < pool_size_; ++fid) {
     // FlushPageImpl(i); // 这样写有问题，因为FlushPageImpl传入的参数是page id，其值可以>=pool size
-    Page *page = &pages_[i];
-    if (page->page_id_ != INVALID_PAGE_ID && page->IsDirty()) {
-      disk_manager_->WritePage(page->page_id_, page->data_);
+    Page *page = &pages_[fid];
+    page_id_t pid = page->page_id_;
+    if (pid != INVALID_PAGE_ID && page->IsDirty()) {
+      disk_manager_->WritePage(pid, page->data_);
       page->is_dirty_ = false;
     }
   }
@@ -124,12 +125,13 @@ auto BufferPoolManagerInstance::NewPgImp(page_id_t *page_id) -> Page * {
   // 2.   Pick a victim page P from either the free list or the replacer. Always pick from the free list first.
   // 3.   Update P's metadata, zero out memory and add P to the page table.
   // 4.   Set the page ID output parameter. Return a pointer to P.
-  std::unique_lock<std::mutex> lock(latch_);
+  std::scoped_lock lock{latch_};
+
   page_id_t new_page_id = AllocatePage();
 
   bool is_all = true;
-  for (size_t i = 0; i < pool_size_; i++) {
-    if (pages_[i].pin_count_ == 0) {
+  for (size_t fid = 0; fid < pool_size_; ++fid) {
+    if (pages_[fid].pin_count_ == 0) {
       is_all = false;
       break;
     }
@@ -145,7 +147,7 @@ auto BufferPoolManagerInstance::NewPgImp(page_id_t *page_id) -> Page * {
   }
   // 2 得到victim frame_id（从free_list或replacer中得到）
   *page_id = new_page_id;          // 分配一个新的page_id（修改了外部参数*page_id）
-  Page *page = &pages_[frame_id];  // 由frame_id得到page
+  Page *page = &pages_[frame_id];  // 由frame_id得到page,此时还是旧页
   // pages_[frame_id]就是首地址偏移frame_id，左边的*page表示是一个指针指向那个地址，所以右边加&
   UpdatePage(page, *page_id, frame_id);
   replacer_->Pin(frame_id);  // FIX BUG in project2 checkpoint1（这里忘记pin了）
@@ -162,7 +164,8 @@ auto BufferPoolManagerInstance::FetchPgImp(page_id_t page_id) -> Page * {
   // 2.     If R is dirty, write it back to the disk.
   // 3.     Delete R from the page table and insert P.
   // 4.     Update P's metadata, read in the page content from disk, and then return a pointer to P.
-  std::unique_lock<std::mutex> lock(latch_);
+  std::scoped_lock lock{latch_};
+
   auto it = page_table_.find(page_id);
   if (it != page_table_.end()) {
     // 该页面在缓存池里面
@@ -196,10 +199,10 @@ auto BufferPoolManagerInstance::DeletePgImp(page_id_t page_id) -> bool {
   // 2.   If P exists, but has a non-zero pin-count, return false. Someone is using the page.
   // 3.   Otherwise, P can be deleted. Remove P from the page table, reset its metadata and return it to the free list.
   // std::unique_lock<std::mutex> lock(latch_);
-  std::unique_lock<std::mutex> lock(latch_);
+  std::scoped_lock lock{latch_};
 
   auto iter = page_table_.find(page_id);
-  // 1 该page在页表中不存在
+  // 1 该page在内存中不存在，就是在磁盘，返回true
   if (iter == page_table_.end()) {
     return true;
   }
@@ -222,8 +225,9 @@ auto BufferPoolManagerInstance::DeletePgImp(page_id_t page_id) -> bool {
 }
 
 auto BufferPoolManagerInstance::UnpinPgImp(page_id_t page_id, bool is_dirty) -> bool {
-  std::unique_lock<std::mutex> lock(latch_);
-  // 1. 如果page_table中就没有
+  std::scoped_lock lock{latch_};
+
+  // 1. 如果page_table中就没有，就不能加到lru，返回false
   auto iter = page_table_.find(page_id);
   if (iter == page_table_.end()) {
     return false;
