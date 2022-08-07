@@ -59,6 +59,10 @@ class BufferPoolManagerInstance : public BufferPoolManager {
   Page *GetPages() { return pages_; }
 
  protected:
+  // 自定义辅助函数
+  bool FindFreeFrame(frame_id_t *frame_id);
+  void UpdatePage(Page *page, page_id_t new_page_id, frame_id_t new_frame_id);
+
   /**
    * Fetch the requested page from the buffer pool.
    * @param page_id id of page to be fetched
