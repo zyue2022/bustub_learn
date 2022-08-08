@@ -10,11 +10,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "storage/page/hash_table_bucket_page.h"
+#include <vector>
+
 #include "common/logger.h"
 #include "common/util/hash_util.h"
 #include "storage/index/generic_key.h"
 #include "storage/index/hash_comparator.h"
+#include "storage/page/hash_table_bucket_page.h"
 #include "storage/table/tmp_tuple.h"
 
 namespace bustub {
@@ -24,7 +26,7 @@ bool HASH_TABLE_BUCKET_TYPE::GetValue(KeyType key, KeyComparator cmp, std::vecto
   bool is_get = false;
   for (size_t i = 0; i < BUCKET_ARRAY_SIZE; ++i) {
     if (IsReadable(i) && cmp(key, array_[i].first) == 0) {
-      result->push_back(array_[i].second);
+      result->push_back(ValueAt(i));
       is_get = true;
     }
   }
@@ -33,31 +35,33 @@ bool HASH_TABLE_BUCKET_TYPE::GetValue(KeyType key, KeyComparator cmp, std::vecto
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 bool HASH_TABLE_BUCKET_TYPE::Insert(KeyType key, ValueType value, KeyComparator cmp) {
-  int32_t free_idx = -1;
-  for (size_t i = 0; i < BUCKET_ARRAY_SIZE; ++i) {
-    if (IsReadable(i)) {
-      if (cmp(key, array_[i].first) == 0 && (value == array_[i].second)) {
-        return false;
-      }
-    } else if (free_idx == -1) {
-      free_idx = i;
+  // 满了
+  if (IsFull()) {
+    return false;
+  }
+  // 重复键值对
+  std::vector<ValueType> result;
+  GetValue(key, cmp, &result);
+  if (std::find(result.begin(), result.end(), value) != result.end()) {
+    return false;
+  }
+  // 可以插入
+  for (uint32_t i = 0; i < BUCKET_ARRAY_SIZE; ++i) {
+    if (!IsReadable(i)) {
+      array_[i] = MappingType(key, value);
+      SetReadable(i);
+      SetOccupied(i);
       break;
     }
   }
-  if (free_idx != -1) {
-    SetOccupied(free_idx);
-    SetReadable(free_idx);
-    array_[free_idx] = MappingType(key, value);
-    return true;
-  }
-  return false;
+  return true;
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 bool HASH_TABLE_BUCKET_TYPE::Remove(KeyType key, ValueType value, KeyComparator cmp) {
   for (size_t i = 0; i < BUCKET_ARRAY_SIZE; ++i) {
     if (IsReadable(i)) {
-      if (cmp(key, array_[i].first) == 0 && (value == array_[i].second)) {
+      if (cmp(key, KeyAt(i)) == 0 && (value == ValueAt(i))) {
         RemoveAt(i);
         return true;
       }
@@ -164,9 +168,7 @@ bool HASH_TABLE_BUCKET_TYPE::IsEmpty() {
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void HASH_TABLE_BUCKET_TYPE::ResetBucketPage() {
-  memset(occupied_, 0, sizeof(occupied_));
   memset(readable_, 0, sizeof(readable_));
-  memset(array_, 0, sizeof(array_));
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>

@@ -11,8 +11,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "storage/page/hash_table_directory_page.h"
+
 #include <algorithm>
 #include <unordered_map>
+
 #include "common/logger.h"
 
 namespace bustub {
@@ -38,15 +40,16 @@ uint32_t HashTableDirectoryPage::GetLocalDepthMask(uint32_t bucket_idx) {
  * @return {*}
  */
 void HashTableDirectoryPage::IncrGlobalDepth() {
-  int old_bit_deep = Size();
-  for (int old_idx = 0, new_idx = old_bit_deep; old_idx < old_bit_deep; ++old_idx, ++new_idx) {
+  assert(global_depth_ < 9);
+  uint32_t old_size = Size();
+  for (uint32_t old_idx = 0, new_idx = old_size; old_idx < old_size; ++old_idx, ++new_idx) {
     bucket_page_ids_[new_idx] = bucket_page_ids_[old_idx];
     local_depths_[new_idx] = local_depths_[old_idx];
   }
   ++global_depth_;
 }
 
-void HashTableDirectoryPage::DecrGlobalDepth() { global_depth_--; }
+void HashTableDirectoryPage::DecrGlobalDepth() { --global_depth_; }
 
 page_id_t HashTableDirectoryPage::GetBucketPageId(uint32_t bucket_idx) { return bucket_page_ids_[bucket_idx]; }
 
@@ -61,9 +64,9 @@ uint32_t HashTableDirectoryPage::Size() { return (1 << global_depth_); }
  * @return {*}
  */
 bool HashTableDirectoryPage::CanShrink() {
-  int size = Size();
-  for (int i = 0; i < size; ++i) {
-    if (local_depths_[i] >= global_depth_) {
+  uint32_t size = Size();
+  for (uint32_t i = 0; i < size; ++i) {
+    if (local_depths_[i] == global_depth_) {
       return false;
     }
   }
@@ -73,10 +76,14 @@ bool HashTableDirectoryPage::CanShrink() {
 uint32_t HashTableDirectoryPage::GetLocalDepth(uint32_t bucket_idx) { return local_depths_[bucket_idx]; }
 
 void HashTableDirectoryPage::SetLocalDepth(uint32_t bucket_idx, uint8_t local_depth) {
+  assert(local_depth <= global_depth_);
   local_depths_[bucket_idx] = local_depth;
 }
 
-void HashTableDirectoryPage::IncrLocalDepth(uint32_t bucket_idx) { ++local_depths_[bucket_idx]; }
+void HashTableDirectoryPage::IncrLocalDepth(uint32_t bucket_idx) {
+  ++local_depths_[bucket_idx];
+  assert(local_depths_[bucket_idx] <= global_depth_);
+}
 
 void HashTableDirectoryPage::DecrLocalDepth(uint32_t bucket_idx) { --local_depths_[bucket_idx]; }
 
@@ -87,7 +94,9 @@ void HashTableDirectoryPage::DecrLocalDepth(uint32_t bucket_idx) { --local_depth
  * @return the directory index of the split image
  **/
 uint32_t HashTableDirectoryPage::GetSplitImageIndex(uint32_t bucket_idx) {
-  return bucket_idx ^ (1 << (local_depths_[bucket_idx] - 1));
+  // 用异或，给待分裂桶的下标的最高位取反，得到兄弟桶下标
+  uint32_t local_deep = local_depths_[bucket_idx];
+  return bucket_idx ^ (1 << (local_deep - 1));
 }
 
 /**
