@@ -61,9 +61,9 @@ uint32_t HashTableDirectoryPage::Size() { return (1 << global_depth_); }
  * @return {*}
  */
 bool HashTableDirectoryPage::CanShrink() {
-  int bit_size = Size();
-  for (int i = 0; i < bit_size; ++i) {
-    if (local_depths_[i] == global_depth_) {
+  int size = Size();
+  for (int i = 0; i < size; ++i) {
+    if (local_depths_[i] >= global_depth_) {
       return false;
     }
   }

@@ -31,14 +31,13 @@ HASH_TABLE_TYPE::ExtendibleHashTable(const std::string &name, BufferPoolManager 
                                      const KeyComparator &comparator, HashFunction<KeyType> hash_fn)
     : buffer_pool_manager_(buffer_pool_manager), comparator_(comparator), hash_fn_(std::move(hash_fn)) {
   //  implement me!
-  directory_page_id_ = INVALID_PAGE_ID;
+
   // 分配目录页
-  page_id_t dir_page_id = INVALID_PAGE_ID;
-  Page *dir_page_raw = buffer_pool_manager_->NewPage(&dir_page_id);
-  assert(dir_page_id != INVALID_PAGE_ID);
+  directory_page_id_ = INVALID_PAGE_ID;
+  Page *dir_page_raw = buffer_pool_manager_->NewPage(&directory_page_id_);
+  assert(directory_page_id_ != INVALID_PAGE_ID);
   assert(dir_page_raw != nullptr);
   auto dir_page = reinterpret_cast<HashTableDirectoryPage *>(dir_page_raw->GetData());
-  directory_page_id_ = dir_page_id;
   dir_page->SetPageId(directory_page_id_);
 
   // 分配第一个桶页
@@ -49,8 +48,8 @@ HASH_TABLE_TYPE::ExtendibleHashTable(const std::string &name, BufferPoolManager 
   dir_page->SetBucketPageId(0, buc_page_id);  // 索引是0
 
   // 记得unpin
-  buffer_pool_manager_->UnpinPage(dir_page_id, true);
-  buffer_pool_manager_->UnpinPage(buc_page_id, true);
+  assert(buffer_pool_manager_->UnpinPage(directory_page_id_, true));
+  assert(buffer_pool_manager_->UnpinPage(buc_page_id, true));
 }
 
 /*****************************************************************************
@@ -82,20 +81,26 @@ inline uint32_t HASH_TABLE_TYPE::KeyToPageId(KeyType key, HashTableDirectoryPage
   return dir_page->GetBucketPageId(KeyToDirectoryIndex(key, dir_page));
 }
 
+/**
+ * @description: 这儿不要unpin，只是取出，还没有使用；由使用目录页的函数用完后unpin
+ * @return {*}
+ */
 template <typename KeyType, typename ValueType, typename KeyComparator>
 HashTableDirectoryPage *HASH_TABLE_TYPE::FetchDirectoryPage() {
   assert(directory_page_id_ != INVALID_PAGE_ID);
   Page *dir_page_raw = buffer_pool_manager_->FetchPage(directory_page_id_);
+  assert(dir_page_raw != nullptr);
   return reinterpret_cast<HashTableDirectoryPage *>(dir_page_raw->GetData());
 }
 /**
- * @description: fetch目录页和桶页的返回类型有些不同
+ * @description: fetch目录页和桶页的返回类型有些不同，因为是模板，也不unpin
  * @return {*}
  */
 template <typename KeyType, typename ValueType, typename KeyComparator>
 HASH_TABLE_BUCKET_TYPE *HASH_TABLE_TYPE::FetchBucketPage(page_id_t buc_page_id) {
   assert(buc_page_id != INVALID_PAGE_ID);
   Page *buc_page_raw = buffer_pool_manager_->FetchPage(buc_page_id);
+  assert(buc_page_raw != nullptr);
   return reinterpret_cast<HASH_TABLE_BUCKET_TYPE *>(buc_page_raw->GetData());
 }
 
@@ -116,8 +121,8 @@ bool HASH_TABLE_TYPE::GetValue(Transaction *transaction, const KeyType &key, std
   bool ok = buc_page->GetValue(key, comparator_, result);
   buc_page_raw->RUnlatch();
   // 记得unpin
-  buffer_pool_manager_->UnpinPage(directory_page_id_, false);
-  buffer_pool_manager_->UnpinPage(buc_page_id, false);
+  assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
+  assert(buffer_pool_manager_->UnpinPage(buc_page_id, false));
   table_latch_.RUnlock();
   return ok;
 }
@@ -144,15 +149,15 @@ bool HASH_TABLE_TYPE::Insert(Transaction *transaction, const KeyType &key, const
   if (!buc_page->IsFull()) {
     bool ok = buc_page->Insert(key, value, comparator_);
     buc_page_raw->WUnlatch();
-    buffer_pool_manager_->UnpinPage(directory_page_id_, false);
-    buffer_pool_manager_->UnpinPage(buc_page_id, true);
+    assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
+    assert(buffer_pool_manager_->UnpinPage(buc_page_id, true));
     table_latch_.RUnlock();
     return ok;
   }
   // 目标桶容量不足，需要分裂
   buc_page_raw->WUnlatch();
-  buffer_pool_manager_->UnpinPage(directory_page_id_, false);
-  buffer_pool_manager_->UnpinPage(buc_page_id, false);
+  assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
+  assert(buffer_pool_manager_->UnpinPage(buc_page_id, false));
   table_latch_.RUnlock();
   return SplitInsert(transaction, key, value);
 }
@@ -165,6 +170,7 @@ template <typename KeyType, typename ValueType, typename KeyComparator>
 bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, const ValueType &value) {
   // 全局哈希表加写锁，分裂时目录页和桶页都可能变化
   table_latch_.WLock();  // writers are splits and merges
+  // 同样每次先取得目录页和桶页
   HashTableDirectoryPage *dir_page = FetchDirectoryPage();
   page_id_t buc_page_id = KeyToPageId(key, dir_page);
   HASH_TABLE_BUCKET_TYPE *buc_page = FetchBucketPage(buc_page_id);
@@ -182,7 +188,7 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
   Page *buc_page_raw = reinterpret_cast<Page *>(buc_page);
   buc_page_raw->WLatch();
   uint32_t num = buc_page->NumReadable();
-  MappingType *temp_old_pairs = buc_page->FetchAllMappingType();
+  MappingType *old_pairs_arr = buc_page->FetchAllMappingType();
   buc_page->ResetBucketPage();
 
   // 创建一个新的bucket页面
@@ -194,21 +200,21 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
   // 往新页面转移数据
   image_buc_page_raw->WLatch();
   auto image_buc_page = reinterpret_cast<HASH_TABLE_BUCKET_TYPE *>(image_buc_page_raw);
-  uint32_t split_image_index = dir_page->GetSplitImageIndex(buc_page_id);
-  dir_page->SetLocalDepth(split_image_index, dir_page->GetLocalDepth(buc_idx));
-  dir_page->SetBucketPageId(split_image_index, image_buc_page_id);
+  uint32_t image_buc_idx = dir_page->GetSplitImageIndex(buc_idx);
+  dir_page->SetLocalDepth(image_buc_idx, dir_page->GetLocalDepth(buc_idx));
+  dir_page->SetBucketPageId(image_buc_idx, image_buc_page_id);
   for (uint32_t i = 0; i < num; ++i) {
     // 相当于 key to 桶id，用localmask是保证数据只能落在原桶或镜像桶
-    uint32_t new_buc_id = Hash(temp_old_pairs[i].first) & dir_page->GetLocalDepthMask(buc_idx);
-    page_id_t temp_page_id = dir_page->GetBucketPageId(new_buc_id);
+    uint32_t new_buc_idx = Hash(old_pairs_arr[i].first) & dir_page->GetLocalDepthMask(buc_idx);
+    page_id_t temp_page_id = dir_page->GetBucketPageId(new_buc_idx);
     assert(temp_page_id == buc_page_id || temp_page_id == image_buc_page_id);
     if (temp_page_id == buc_page_id) {
-      buc_page->Insert(temp_old_pairs[i].first, temp_old_pairs[i].second, comparator_);
+      buc_page->Insert(old_pairs_arr[i].first, old_pairs_arr[i].second, comparator_);
     } else {
-      image_buc_page->Insert(temp_old_pairs[i].first, temp_old_pairs[i].second, comparator_);
+      image_buc_page->Insert(old_pairs_arr[i].first, old_pairs_arr[i].second, comparator_);
     }
   }
-  delete[] temp_old_pairs;
+  delete[] old_pairs_arr;
 
   // 不懂？？？？？？？？？？？？？？？？？？？？？？？？
   // 上面只修改了原bucket与image_bucket的相关信息，
@@ -222,22 +228,22 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
     dir_page->SetBucketPageId(i, buc_page_id);
     dir_page->SetLocalDepth(i, dir_page->GetLocalDepth(buc_idx));
   }
-  for (uint32_t i = split_image_index; i >= step; i -= step) {
+  for (uint32_t i = image_buc_idx; i >= step; i -= step) {
     dir_page->SetBucketPageId(i, image_buc_page_id);
-    dir_page->SetLocalDepth(i, dir_page->GetLocalDepth(split_image_index));
+    dir_page->SetLocalDepth(i, dir_page->GetLocalDepth(image_buc_idx));
   }
-  for (uint32_t i = split_image_index; i < dir_page->Size(); i += step) {
+  for (uint32_t i = image_buc_idx; i < dir_page->Size(); i += step) {
     dir_page->SetBucketPageId(i, image_buc_page_id);
-    dir_page->SetLocalDepth(i, dir_page->GetLocalDepth(split_image_index));
+    dir_page->SetLocalDepth(i, dir_page->GetLocalDepth(image_buc_idx));
   }
 
   buc_page_raw->WUnlatch();
   image_buc_page_raw->WUnlatch();
 
   // Unpin
-  buffer_pool_manager_->UnpinPage(buc_page_id, true);
-  buffer_pool_manager_->UnpinPage(image_buc_page_id, true);
-  buffer_pool_manager_->UnpinPage(directory_page_id_, true);
+  assert(buffer_pool_manager_->UnpinPage(buc_page_id, true));
+  assert(buffer_pool_manager_->UnpinPage(image_buc_page_id, true));
+  assert(buffer_pool_manager_->UnpinPage(directory_page_id_, true));
   table_latch_.WUnlock();
 
   // 再次尝试插入数据
@@ -263,7 +269,6 @@ bool HASH_TABLE_TYPE::Remove(Transaction *transaction, const KeyType &key, const
   // 如果当前bucket空了，则执行合并
   if (buc_page->IsEmpty()) {
     buc_page_raw->WUnlatch();
-    // Unpin
     buffer_pool_manager_->UnpinPage(buc_page_id, true);
     buffer_pool_manager_->UnpinPage(directory_page_id_, false);
     table_latch_.RUnlock();
@@ -284,24 +289,25 @@ template <typename KeyType, typename ValueType, typename KeyComparator>
 void HASH_TABLE_TYPE::Merge(Transaction *transaction, const KeyType &key, const ValueType &value) {
   // 合并就需要加哈希表的写锁了
   table_latch_.WLock();  // writers are splits and merges
-  HashTableDirectoryPage *dir_page = FetchDirectoryPage();
-  // 桶在目录的索引
-  uint32_t buc_idx = KeyToDirectoryIndex(key, dir_page);
-  uint32_t image_buc_idx = dir_page->GetSplitImageIndex(buc_idx);
 
+  // 同样先获得目录页、桶页
+  HashTableDirectoryPage *dir_page = FetchDirectoryPage();
   page_id_t buc_page_id = dir_page->GetBucketPageId(buc_idx);
   HASH_TABLE_BUCKET_TYPE *buc_page = FetchBucketPage(buc_page_id);
 
+  // 桶在目录的索引，不是页id
+  uint32_t buc_idx = KeyToDirectoryIndex(key, dir_page); 
+  uint32_t image_buc_idx = dir_page->GetSplitImageIndex(buc_idx);
+
   // local depth为0说明已经最小了，不收缩
-  uint32_t local_depth = dir_page->GetLocalDepth(buc_idx);
-  if (local_depth == 0) {
+  if (dir_page->GetLocalDepth(buc_idx) == 0) {
     buffer_pool_manager_->UnpinPage(dir_page->GetPageId(), false);
     table_latch_.WUnlock();
     return;
   }
 
   // 如果该bucket与其split image深度不同，也不收缩
-  if (local_depth != dir_page->GetLocalDepth(image_buc_idx)) {
+  if (dir_page->GetLocalDepth(buc_idx) != dir_page->GetLocalDepth(image_buc_idx)) {
     buffer_pool_manager_->UnpinPage(dir_page->GetPageId(), false);
     table_latch_.WUnlock();
     return;
@@ -317,7 +323,6 @@ void HASH_TABLE_TYPE::Merge(Transaction *transaction, const KeyType &key, const 
     table_latch_.WUnlock();
     return;
   }
-
   buc_page_raw->RUnlatch();
 
   // 删除bucket，此时该bucket已经为空
@@ -332,9 +337,10 @@ void HASH_TABLE_TYPE::Merge(Transaction *transaction, const KeyType &key, const 
   assert(dir_page->GetLocalDepth(buc_idx) == dir_page->GetLocalDepth(image_buc_idx));
 
   // 遍历整个directory，将所有指向buc_page的bucket全部重新指向image_buc_page
-  for (uint32_t i = 0; i < dir_page->Size(); ++i) {
+  uint32_t size = dir_page->Size();
+  for (uint32_t i = 0; i < size; ++i) {
     page_id_t temp_page_id = dir_page->GetBucketPageId(i);
-    if (temp_page_id == buc_page_id || temp_page_id == image_page_id) {
+    if (temp_page_id == buc_page_id) {
       dir_page->SetBucketPageId(i, image_page_id);
       dir_page->SetLocalDepth(i, dir_page->GetLocalDepth(image_buc_idx));
     }
