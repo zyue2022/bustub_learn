@@ -42,9 +42,9 @@ uint32_t HashTableDirectoryPage::GetLocalDepthMask(uint32_t bucket_idx) {
 void HashTableDirectoryPage::IncrGlobalDepth() {
   assert(global_depth_ < 9);
   uint32_t old_size = Size();
-  for (uint32_t old_idx = 0, new_idx = old_size; old_idx < old_size; ++old_idx, ++new_idx) {
-    bucket_page_ids_[new_idx] = bucket_page_ids_[old_idx];
-    local_depths_[new_idx] = local_depths_[old_idx];
+  for (uint32_t i = 0; i < old_size; ++i) {
+    bucket_page_ids_[i + old_size] = bucket_page_ids_[i];
+    local_depths_[i + old_size] = local_depths_[i];
   }
   ++global_depth_;
 }
@@ -66,6 +66,7 @@ uint32_t HashTableDirectoryPage::Size() { return (1 << global_depth_); }
 bool HashTableDirectoryPage::CanShrink() {
   uint32_t size = Size();
   for (uint32_t i = 0; i < size; ++i) {
+    assert(local_depths_[i] <= global_depth_);
     if (local_depths_[i] == global_depth_) {
       return false;
     }

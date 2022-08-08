@@ -203,7 +203,7 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
     dir_page->IncrGlobalDepth();
   }
 
-  // 必须增加local_depth
+  // 必须增加local_depth 因为求镜像桶索引时，split函数是高位取反，需要先增加一位
   dir_page->IncrLocalDepth(buc_idx);
 
   // 取出原来 bucket的信息，先加锁
@@ -220,23 +220,26 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
   Page *image_buc_page_raw = buffer_pool_manager_->NewPage(&image_buc_page_id);
   assert(image_buc_page_id != INVALID_PAGE_ID);
   assert(image_buc_page_raw != nullptr);
+  auto image_buc_page = reinterpret_cast<HASH_TABLE_BUCKET_TYPE *>(image_buc_page_raw->GetData());
+  image_buc_page_raw->WLatch();
 
   // 往新页面转移数据，溢出桶中的元素被重新散列到目录的新全局深度
-  image_buc_page_raw->WLatch();
-  auto image_buc_page = reinterpret_cast<HASH_TABLE_BUCKET_TYPE *>(image_buc_page_raw->GetData());
-  assert(image_buc_page != nullptr);
   uint32_t image_buc_idx = dir_page->GetSplitImageIndex(buc_idx);
-  dir_page->SetLocalDepth(image_buc_idx, dir_page->GetLocalDepth(buc_idx));
+  dir_page->SetLocalDepth(image_buc_idx, dir_page->GetLocalDepth(buc_idx));  // 新旧桶局部高度相同
   dir_page->SetBucketPageId(image_buc_idx, image_buc_page_id);
+
+  // 遍历旧桶对应页面的元素
   for (uint32_t i = 0; i < origin_num; ++i) {
-    // 相当于 key to 新寄居桶的id，用localmask是保证数据只能落在原桶或镜像桶
-    uint32_t new_buc_idx = Hash(old_pairs_arr[i].first) & dir_page->GetLocalDepthMask(buc_idx);
-    page_id_t temp_page_id = dir_page->GetBucketPageId(new_buc_idx);
-    assert(temp_page_id == buc_page_id || temp_page_id == image_buc_page_id);
-    if (temp_page_id == buc_page_id) {
-      buc_page->Insert(old_pairs_arr[i].first, old_pairs_arr[i].second, comparator_);
+    const auto &[cur_key, cur_value] = old_pairs_arr[i];
+    // 相当于 key to 桶的id，用localmask是保证数据只能落在原桶或镜像桶
+    uint32_t new_buc_idx = Hash(cur_key) & dir_page->GetLocalDepthMask(buc_idx);
+    page_id_t cur_page_id = dir_page->GetBucketPageId(new_buc_idx);
+    // assert(cur_page_id == buc_page_id || cur_page_id == image_buc_page_id);
+    assert(new_buc_idx == buc_idx || new_buc_idx == image_buc_idx);
+    if (cur_page_id == buc_page_id) {
+      assert(buc_page->Insert(cur_key, cur_value, comparator_));
     } else {
-      image_buc_page->Insert(old_pairs_arr[i].first, old_pairs_arr[i].second, comparator_);
+      assert(image_buc_page->Insert(cur_key, cur_value, comparator_));
     }
   }
   delete[] old_pairs_arr;
