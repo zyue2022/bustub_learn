@@ -66,7 +66,7 @@ void BufferPoolManagerInstance::UpdatePage(Page *page, page_id_t new_page_id, fr
 
   // 2 更新page table ,删除页表中原page_id和其对应frame_id
   if (page_table_.count(page->page_id_) > 0) {
-    page_table_.erase(page->page_id_);                
+    page_table_.erase(page->page_id_);
   }
   if (new_page_id != INVALID_PAGE_ID) {              // 注意INVALID_PAGE_ID不要加到页表
     page_table_.emplace(new_page_id, new_frame_id);  // 新的page_id和其对应frame_id加到页表
@@ -207,7 +207,7 @@ bool BufferPoolManagerInstance::DeletePgImp(page_id_t page_id) {
 
   // 4 从内存清除该页,将对应的fid加入空闲链表
   page->is_dirty_ = false;
-  replacer_->Pin(frame_id);   // 从lru移除，因为是直接加入空闲链表了
+  replacer_->Pin(frame_id);                     // 从lru移除，因为是直接加入空闲链表了
   DeallocatePage(page_id);                      // This does not actually need to do anything for now
   UpdatePage(page, INVALID_PAGE_ID, frame_id);  // 虽然是无效页id，但更新函数中不会添加到哈希表
   page->pin_count_ = 0;

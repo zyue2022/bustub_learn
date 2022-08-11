@@ -125,14 +125,15 @@ bool HASH_TABLE_TYPE::GetValue(Transaction *transaction, const KeyType &key, std
   // 桶页加读锁
   Page *buc_page_raw = reinterpret_cast<Page *>(buc_page);
   buc_page_raw->RLatch();
-  bool ok = buc_page->GetValue(key, comparator_, result);
+  bool get_ok = buc_page->GetValue(key, comparator_, result);
   buc_page_raw->RUnlatch();
 
   // 记得unpin
   assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
   assert(buffer_pool_manager_->UnpinPage(buc_page_id, false));
+  // 最后解全局锁
   table_latch_.RUnlock();
-  return ok;
+  return get_ok;
 }
 
 /*****************************************************************************
@@ -155,28 +156,30 @@ bool HASH_TABLE_TYPE::Insert(Transaction *transaction, const KeyType &key, const
   // 桶页加写锁了
   Page *buc_page_raw = reinterpret_cast<Page *>(buc_page);
   buc_page_raw->WLatch();
+  bool is_full = buc_page->IsFull();
+  bool insert_ok = false;
 
   // 该桶还有容量，直接添加
-  if (!buc_page->IsFull()) {
-    bool ok = buc_page->Insert(key, value, comparator_);
-    buc_page_raw->WUnlatch();
-    assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
-    assert(buffer_pool_manager_->UnpinPage(buc_page_id, true));
-    table_latch_.RUnlock();
-    return ok;
+  if (!is_full) {
+    insert_ok = buc_page->Insert(key, value, comparator_);
   }
-
-  // 目标桶容量不足，需要分裂
   buc_page_raw->WUnlatch();
   assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
-  assert(buffer_pool_manager_->UnpinPage(buc_page_id, false));
+  assert(buffer_pool_manager_->UnpinPage(buc_page_id, true));
   table_latch_.RUnlock();
-  return SplitInsert(transaction, key, value);
+
+  // 目标桶容量不足，需要分裂
+  if (is_full) {
+    return SplitInsert(transaction, key, value);
+  }
+
+  return insert_ok;
 }
 
 /**
  * @description: lab2最难的函数了...，扩容后再尝试插入
  *               目录扩展将使散列结构中存在的目录数量增加一倍
+ *            任何局部深度小于全局深度的存储桶都被多个目录指向
  * @return {*}
  */
 template <typename KeyType, typename ValueType, typename KeyComparator>
@@ -189,10 +192,24 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
   uint32_t buc_idx = KeyToDirectoryIndex(key, dir_page);  // 获取当前桶在目录页的索引，不是桶页id
 
   // 高度控制，不能再扩容
-  if (dir_page->GetLocalDepth(buc_idx) >= MAX_GLOBAL_DEPTH) {
+  assert(dir_page->GetLocalDepth(buc_idx) <= MAX_GLOBAL_DEPTH);
+  if (dir_page->GetLocalDepth(buc_idx) == MAX_GLOBAL_DEPTH) {
     assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
     table_latch_.WUnlock();
     return false;
+  }
+
+  // 原来的bucket
+  page_id_t buc_page_id = dir_page->GetBucketPageId(buc_idx);
+  HASH_TABLE_BUCKET_TYPE *buc_page = FetchBucketPage(buc_page_id);
+
+  // 再次检查是不是满了
+  if (!buc_page->IsFull()) {
+    bool insert_ok = buc_page->Insert(key, value, comparator_);
+    assert(buffer_pool_manager_->UnpinPage(buc_page_id, false));
+    assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
+    table_latch_.WUnlock();
+    return insert_ok;
   }
 
   // 遇到buc_local_depth == global_depth，还需要扩目录页高度
@@ -200,16 +217,15 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
     dir_page->IncrGlobalDepth();
   }
 
-  // 必须增加local_depth 因为求镜像桶索引时，split函数是高位取反，需要先增加一位
+  // 必须增加local_depth 因为求镜像桶索引时，split函数是高位取反，需要先增加一位；当然，该桶满了肯定要增加深度
   dir_page->IncrLocalDepth(buc_idx);
+  uint32_t new_local_deep = dir_page->GetLocalDepth(buc_idx);  // 两兄弟桶高度必定相同
 
-  // 取出原来 bucket的信息，先加锁
-  page_id_t buc_page_id = KeyToPageId(key, dir_page);
-  HASH_TABLE_BUCKET_TYPE *buc_page = FetchBucketPage(buc_page_id);
+  // 旧桶
   Page *buc_page_raw = reinterpret_cast<Page *>(buc_page);
-  buc_page_raw->WLatch();
-  auto old_pairs_arr = buc_page->FetchAllMappingType();
-  buc_page->ResetBucketPage();
+  buc_page_raw->WLatch();  // 先加锁
+  std::vector<MappingType> old_pairs_arr = buc_page->FetchAllMappingType();
+  buc_page->ResetBucketPage();  // 旧桶清空
 
   // 创建一个新的bucket页面
   page_id_t image_buc_page_id = INVALID_PAGE_ID;
@@ -219,53 +235,53 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
   auto image_buc_page = reinterpret_cast<HASH_TABLE_BUCKET_TYPE *>(image_buc_page_raw->GetData());
   image_buc_page_raw->WLatch();
 
-  // 往新页面转移数据，溢出桶中的元素被重新散列到目录的新全局深度
+  // 设置新页面高度和id，溢出桶中的元素被重新散列到目录的新全局深度
   uint32_t image_buc_idx = dir_page->GetSplitImageIndex(buc_idx);
-  dir_page->SetLocalDepth(image_buc_idx, dir_page->GetLocalDepth(buc_idx));  // 新旧桶局部高度相同
+  dir_page->SetLocalDepth(image_buc_idx, new_local_deep);  // 新旧桶局部高度相同
   dir_page->SetBucketPageId(image_buc_idx, image_buc_page_id);
+  assert(dir_page->GetLocalDepth(buc_idx) == dir_page->GetLocalDepth(image_buc_idx));
+  assert(buc_page_id == dir_page->GetBucketPageId(buc_idx));
+  assert(image_buc_page_id == dir_page->GetBucketPageId(image_buc_idx));
 
-  // 遍历旧桶对应页面的元素
-  for (auto& old_pair : old_pairs_arr) {
+  // 遍历旧桶对应页面的元素,重新分配位置
+  for (auto &old_pair : old_pairs_arr) {
     const auto &[cur_key, cur_value] = old_pair;
     // 相当于 key to 桶的id，用localmask是保证数据只能落在原桶或镜像桶
+    // dir_page->GetLocalDepthMask(buc_idx) 是该键值对之前加入桶时的 2*mask+1，就是掩码高了一位
     uint32_t new_buc_idx = Hash(cur_key) & dir_page->GetLocalDepthMask(buc_idx);
-    page_id_t cur_page_id = dir_page->GetBucketPageId(new_buc_idx);
-    // assert(cur_page_id == buc_page_id || cur_page_id == image_buc_page_id);
+    page_id_t new_buc_page_id = dir_page->GetBucketPageId(new_buc_idx);
+    assert(new_buc_page_id == buc_page_id || new_buc_page_id == image_buc_page_id);
     assert(new_buc_idx == buc_idx || new_buc_idx == image_buc_idx);
-    if (cur_page_id == buc_page_id) {
+    if (new_buc_page_id == buc_page_id) {
       assert(buc_page->Insert(cur_key, cur_value, comparator_));
     } else {
       assert(image_buc_page->Insert(cur_key, cur_value, comparator_));
     }
   }
 
-  // 上面只修改了原bucket与image_bucket的相关信息，
-  // 实际上可能之前存在许多bucket映射到bucket对应的page上,这些信息也要相应的修改
-  uint32_t deep = dir_page->GetLocalDepth(buc_idx);
-  // 两兄弟桶高度必定相同
-  assert(deep == dir_page->GetLocalDepth(image_buc_idx));
-  uint32_t diff = (1 << deep);  // diff相当于一个分界线，因为全局高度是翻倍增加的
+  // 可能之前存在许多bucket映射到bucket对应的page上,这些信息也要相应的修改
+  uint32_t diff = (1 << new_local_deep);  // diff相当于一个分界线，因为全局高度是翻倍增加的
   for (uint32_t i = buc_idx; i >= diff; i -= diff) {
     dir_page->SetBucketPageId(i, buc_page_id);
-    dir_page->SetLocalDepth(i, deep);
+    dir_page->SetLocalDepth(i, new_local_deep);
     if (i < diff) {
       break;
     }
   }
   for (uint32_t i = buc_idx; i < dir_page->Size(); i += diff) {
     dir_page->SetBucketPageId(i, buc_page_id);
-    dir_page->SetLocalDepth(i, deep);
+    dir_page->SetLocalDepth(i, new_local_deep);
   }
   for (uint32_t i = image_buc_idx; i >= diff; i -= diff) {
     dir_page->SetBucketPageId(i, image_buc_page_id);
-    dir_page->SetLocalDepth(i, deep);
+    dir_page->SetLocalDepth(i, new_local_deep);
     if (i < diff) {
       break;
     }
   }
   for (uint32_t i = image_buc_idx; i < dir_page->Size(); i += diff) {
     dir_page->SetBucketPageId(i, image_buc_page_id);
-    dir_page->SetLocalDepth(i, deep);
+    dir_page->SetLocalDepth(i, new_local_deep);
   }
 
   buc_page_raw->WUnlatch();
@@ -295,27 +311,27 @@ bool HASH_TABLE_TYPE::Remove(Transaction *transaction, const KeyType &key, const
   // 桶上写锁
   Page *buc_page_raw = reinterpret_cast<Page *>(buc_page);
   buc_page_raw->WLatch();
-  bool ok = buc_page->Remove(key, value, comparator_);
+  bool remove_ok = buc_page->Remove(key, value, comparator_);
+  buc_page_raw->WUnlatch();
+  assert(buffer_pool_manager_->UnpinPage(buc_page_id, true));
+  assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
+  table_latch_.RUnlock();
 
   // 如果当前bucket空了，则执行合并
-  if (buc_page->IsEmpty()) {
-    buc_page_raw->WUnlatch();
-    buffer_pool_manager_->UnpinPage(buc_page_id, true);
-    buffer_pool_manager_->UnpinPage(directory_page_id_, false);
-    table_latch_.RUnlock();
+  if (remove_ok && buc_page->IsEmpty()) {
     Merge(transaction, key, value);
-    return ok;
   }
-  buc_page_raw->WUnlatch();
-  buffer_pool_manager_->UnpinPage(buc_page_id, true);
-  buffer_pool_manager_->UnpinPage(directory_page_id_, false);
-  table_latch_.RUnlock();
-  return ok;
+
+  return remove_ok;
 }
 
 /*****************************************************************************
  * MERGE
  *****************************************************************************/
+/**
+ * @description: 合并其实实现的简单，只是合并了一层，没有递归合并
+ * @return {*}
+ */
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void HASH_TABLE_TYPE::Merge(Transaction *transaction, const KeyType &key, const ValueType &value) {
   // 合并就需要加哈希表的写锁了
@@ -330,8 +346,10 @@ void HASH_TABLE_TYPE::Merge(Transaction *transaction, const KeyType &key, const 
 
   // local depth为0说明已经最小了，不收缩
   // 如果该bucket与其split image深度不同，也不收缩
+  // 如果两兄弟桶对应的page相同，也不合并
   if ((dir_page->GetLocalDepth(buc_idx) == 0) ||
-      (dir_page->GetLocalDepth(buc_idx) != dir_page->GetLocalDepth(image_buc_idx))) {
+      (dir_page->GetLocalDepth(buc_idx) != dir_page->GetLocalDepth(image_buc_idx)) ||
+      (dir_page->GetBucketPageId(buc_idx) == dir_page->GetBucketPageId(image_buc_idx))) {
     assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
     table_latch_.WUnlock();
     return;
