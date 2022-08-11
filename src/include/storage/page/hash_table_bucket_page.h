@@ -139,7 +139,7 @@ class HashTableBucketPage {
 
   // 自定义辅助函数，用于桶页面变动
   void ResetBucketPage();
-  MappingType *FetchAllMappingType();
+  std::vector<MappingType> FetchAllMappingType();
 
  private:
   //  For more on BUCKET_ARRAY_SIZE see storage/page/hash_table_page_defs.h

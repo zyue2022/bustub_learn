@@ -20,6 +20,9 @@
 #include "storage/index/generic_key.h"
 #include "storage/page/hash_table_page_defs.h"
 
+// 因为DIRECTORY_ARRAY_SIZE==512 == 2^9
+#define MAX_GLOBAL_DEPTH 9
+
 namespace bustub {
 
 /**

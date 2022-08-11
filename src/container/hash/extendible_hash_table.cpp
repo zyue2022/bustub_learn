@@ -20,9 +20,6 @@
 #include "common/rid.h"
 #include "container/hash/extendible_hash_table.h"
 
-// 因为DIRECTORY_ARRAY_SIZE==512 == 2^9
-#define MAX_GLOBAL_DEPTH 9
-
 namespace bustub {
 
 /**
@@ -211,8 +208,7 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
   HASH_TABLE_BUCKET_TYPE *buc_page = FetchBucketPage(buc_page_id);
   Page *buc_page_raw = reinterpret_cast<Page *>(buc_page);
   buc_page_raw->WLatch();
-  uint32_t origin_num = buc_page->NumReadable();
-  MappingType *old_pairs_arr = buc_page->FetchAllMappingType();
+  auto old_pairs_arr = buc_page->FetchAllMappingType();
   buc_page->ResetBucketPage();
 
   // 创建一个新的bucket页面
@@ -229,8 +225,8 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
   dir_page->SetBucketPageId(image_buc_idx, image_buc_page_id);
 
   // 遍历旧桶对应页面的元素
-  for (uint32_t i = 0; i < origin_num; ++i) {
-    const auto &[cur_key, cur_value] = old_pairs_arr[i];
+  for (auto& old_pair : old_pairs_arr) {
+    const auto &[cur_key, cur_value] = old_pair;
     // 相当于 key to 桶的id，用localmask是保证数据只能落在原桶或镜像桶
     uint32_t new_buc_idx = Hash(cur_key) & dir_page->GetLocalDepthMask(buc_idx);
     page_id_t cur_page_id = dir_page->GetBucketPageId(new_buc_idx);
@@ -242,7 +238,6 @@ bool HASH_TABLE_TYPE::SplitInsert(Transaction *transaction, const KeyType &key, 
       assert(image_buc_page->Insert(cur_key, cur_value, comparator_));
     }
   }
-  delete[] old_pairs_arr;
 
   // 上面只修改了原bucket与image_bucket的相关信息，
   // 实际上可能之前存在许多bucket映射到bucket对应的page上,这些信息也要相应的修改

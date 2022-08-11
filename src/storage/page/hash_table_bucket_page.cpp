@@ -25,7 +25,7 @@ template <typename KeyType, typename ValueType, typename KeyComparator>
 bool HASH_TABLE_BUCKET_TYPE::GetValue(KeyType key, KeyComparator cmp, std::vector<ValueType> *result) {
   bool is_get = false;
   for (size_t i = 0; i < BUCKET_ARRAY_SIZE; ++i) {
-    if (IsReadable(i) && cmp(key, array_[i].first) == 0) {
+    if (IsReadable(i) && cmp(key, KeyAt(i)) == 0) {
       result->push_back(ValueAt(i));
       is_get = true;
     }
@@ -35,7 +35,7 @@ bool HASH_TABLE_BUCKET_TYPE::GetValue(KeyType key, KeyComparator cmp, std::vecto
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 bool HASH_TABLE_BUCKET_TYPE::Insert(KeyType key, ValueType value, KeyComparator cmp) {
-  // 满了
+  // 是否满了
   if (IsFull()) {
     return false;
   }
@@ -70,14 +70,26 @@ bool HASH_TABLE_BUCKET_TYPE::Remove(KeyType key, ValueType value, KeyComparator 
   return false;
 }
 
+/**
+ * @description: 这里的bucket_idx只是一个键值对在桶中的索引，不是桶在目录页的索引
+ * @return {*}
+ */
 template <typename KeyType, typename ValueType, typename KeyComparator>
 KeyType HASH_TABLE_BUCKET_TYPE::KeyAt(uint32_t bucket_idx) const {
-  return array_[bucket_idx].first;
+  assert(bucket_idx < BUCKET_ARRAY_SIZE);
+  if (IsReadable(bucket_idx)) {
+    return array_[bucket_idx].first;
+  }
+  return {};
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 ValueType HASH_TABLE_BUCKET_TYPE::ValueAt(uint32_t bucket_idx) const {
-  return array_[bucket_idx].second;
+  assert(bucket_idx < BUCKET_ARRAY_SIZE);
+  if (IsReadable(bucket_idx)) {
+    return array_[bucket_idx].second;
+  }
+  return {};
 }
 
 /**
@@ -117,36 +129,18 @@ void HASH_TABLE_BUCKET_TYPE::SetReadable(uint32_t bucket_idx) {
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 bool HASH_TABLE_BUCKET_TYPE::IsFull() {
-  size_t len = (BUCKET_ARRAY_SIZE) / 8;
-  u_int8_t mask = 255;
-  for (size_t i = 0; i < len; ++i) {
-    if ((mask & static_cast<uint8_t>(readable_[i])) != mask) {
-      return false;
-    }
-  }
-
-  size_t remain = BUCKET_ARRAY_SIZE % 8;
-  if (remain > 0) {
-    uint8_t last_char = static_cast<uint8_t>(readable_[len]);
-    for (size_t i = 0; i < remain; ++i) {
-      if ((static_cast<uint8_t>(1 << i) & last_char) == 0) {
-        return false;
-      }
-    }
-  }
-
-  return true;
+  return BUCKET_ARRAY_SIZE == NumReadable();
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 uint32_t HASH_TABLE_BUCKET_TYPE::NumReadable() {
   uint32_t readable_cnt = 0;
-  size_t len = (BUCKET_ARRAY_SIZE + 8 - 1) / 8;  // 向上取整
-  for (size_t i = 0; i < len; ++i) {
-    for (size_t j = 0; j < 8; ++j) {
-      if (readable_[i] & (1 << j)) {
-        ++readable_cnt;
-      }
+  int len = (BUCKET_ARRAY_SIZE + 8 - 1) / 8;  // 向上取整
+  for (int i = 0; i < len; ++i) {
+    uint8_t cur = static_cast<uint8_t>(readable_[i]);
+    while (cur != 0) {
+      cur &= (cur - 1);
+      ++readable_cnt;
     }
   }
   return readable_cnt;
@@ -154,33 +148,24 @@ uint32_t HASH_TABLE_BUCKET_TYPE::NumReadable() {
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 bool HASH_TABLE_BUCKET_TYPE::IsEmpty() {
-  bool is_empty = true;
-  u_int8_t mask = 255;
-  size_t len = (BUCKET_ARRAY_SIZE + 8 - 1) / 8;  // 向上取整
-  for (size_t i = 0; i < len; ++i) {
-    if ((mask & readable_[i]) > 0) {
-      is_empty = false;
-      break;
-    }
-  }
-  return is_empty;
+  return 0 == NumReadable();
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void HASH_TABLE_BUCKET_TYPE::ResetBucketPage() {
   memset(readable_, 0, sizeof(readable_));
+  memset(occupied_, 0, sizeof(occupied_));
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
-MappingType *HASH_TABLE_BUCKET_TYPE::FetchAllMappingType() {
-  uint32_t num = NumReadable();
-  MappingType *arr = new MappingType[num];
-  for (uint32_t i = 0, id = 0; i < BUCKET_ARRAY_SIZE; ++i) {
+std::vector<MappingType> HASH_TABLE_BUCKET_TYPE::FetchAllMappingType() {
+  std::vector<MappingType> arr_maptype;
+  for (uint32_t i = 0; i < BUCKET_ARRAY_SIZE; ++i) {
     if (IsReadable(i)) {
-      arr[id++] = array_[i];
+      arr_maptype.emplace_back(array_[i]);
     }
   }
-  return arr;
+  return arr_maptype;
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>

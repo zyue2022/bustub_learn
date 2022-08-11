@@ -50,10 +50,8 @@ void LRUReplacer::Unpin(frame_id_t frame_id) {
     return;
   }
 
-  while (lru_list_.size() >= capacity_) {
-    auto out_frame = lru_list_.back();
-    lru_list_.pop_back();
-    lru_map_.erase(out_frame);
+  if (lru_list_.size() >= capacity_) {
+    return;
   }
 
   lru_list_.emplace_front(frame_id);
