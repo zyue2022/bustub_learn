@@ -329,19 +329,49 @@ bool HASH_TABLE_TYPE::Remove(Transaction *transaction, const KeyType &key, const
  * MERGE
  *****************************************************************************/
 /**
- * @description: 合并其实实现的简单，只是合并了一层，没有递归合并
+ * @description: 合并其实要递归合并
  * @return {*}
  */
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void HASH_TABLE_TYPE::Merge(Transaction *transaction, const KeyType &key, const ValueType &value) {
+  // 这里加读锁，因为只是找到buc_idx
+  table_latch_.RLock();
+
+  // 同样先获得目录页
+  HashTableDirectoryPage *dir_page = FetchDirectoryPage();
+  // 原桶、镜像桶在目录的索引，不是页id
+  uint32_t buc_idx = KeyToDirectoryIndex(key, dir_page);
+  assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
+
+  table_latch_.RUnlock();
+
+  MergeTwo(buc_idx);
+  // 合并可能的余下空桶
+  for (uint32_t idx = 0; idx < dir_page->Size(); ++idx) {
+    MergeTwo(idx);
+  }
+}
+
+/**
+ * @description: 自定义辅助函数，递归合并空桶
+ * @return {*}
+ */
+template <typename KeyType, typename ValueType, typename KeyComparator>
+void HASH_TABLE_TYPE::MergeTwo(uint32_t buc_idx) {
   // 合并就需要加哈希表的写锁了
   table_latch_.WLock();  // writers are splits and merges
 
   // 同样先获得目录页
   HashTableDirectoryPage *dir_page = FetchDirectoryPage();
 
-  // 桶在目录的索引，不是页id
-  uint32_t buc_idx = KeyToDirectoryIndex(key, dir_page);
+  // 无效索引
+  if (buc_idx >= dir_page->Size()) {
+    assert(buffer_pool_manager_->UnpinPage(directory_page_id_, false));
+    table_latch_.WUnlock();
+    return;
+  }
+
+  // 原桶的镜像桶在目录的索引，不是页id
   uint32_t image_buc_idx = dir_page->GetSplitImageIndex(buc_idx);  // 其兄弟桶索引
 
   // local depth为0说明已经最小了，不收缩
@@ -356,7 +386,7 @@ void HASH_TABLE_TYPE::Merge(Transaction *transaction, const KeyType &key, const 
   }
 
   // 因为并发问题，也需要检查桶是不是空
-  page_id_t buc_page_id = KeyToPageId(key, dir_page);
+  page_id_t buc_page_id = dir_page->GetBucketPageId(buc_idx);
   HASH_TABLE_BUCKET_TYPE *buc_page = FetchBucketPage(buc_page_id);
   Page *buc_page_raw = reinterpret_cast<Page *>(buc_page);
   buc_page_raw->RLatch();
