@@ -25,6 +25,7 @@ void DistinctExecutor::Init() {
   while (child_executor_->Next(&child_tuple, &child_rid)) {
     // 构造Key
     DistinctKey dis_key;
+    dis_key.distincts_.reserve(GetOutputSchema()->GetColumnCount());  // 必须先预定空间
     for (uint32_t idx = 0; idx < dis_key.distincts_.capacity(); idx++) {
       dis_key.distincts_.emplace_back(child_tuple.GetValue(GetOutputSchema(), idx));
     }
