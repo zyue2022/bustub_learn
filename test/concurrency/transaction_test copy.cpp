@@ -1,6 +1,14 @@
-/**
- * grading_rollback_test.cpp
- */
+//===----------------------------------------------------------------------===//
+//
+//                         BusTub
+//
+// transaction_test.cpp
+//
+// Identification: test/concurrency/transaction_test.cpp
+//
+// Copyright (c) 2015-2021, Carnegie Mellon University Database Group
+//
+//===----------------------------------------------------------------------===//
 
 #include <atomic>
 #include <cstdio>
@@ -21,11 +29,9 @@
 #include "execution/expressions/column_value_expression.h"
 #include "execution/expressions/comparison_expression.h"
 #include "execution/expressions/constant_value_expression.h"
-#include "execution/plans/delete_plan.h"
 #include "execution/plans/limit_plan.h"
 #include "execution/plans/nested_index_join_plan.h"
 #include "execution/plans/seq_scan_plan.h"
-#include "execution/plans/update_plan.h"
 #include "gtest/gtest.h"
 #include "test_util.h"  // NOLINT
 #include "type/value_factory.h"
@@ -42,7 +48,7 @@
 
 namespace bustub {
 
-class GradingRollbackTest : public ::testing::Test {
+class TransactionTest : public ::testing::Test {
  public:
   // This function is called before every test.
   void SetUp() override {
@@ -77,42 +83,43 @@ class GradingRollbackTest : public ::testing::Test {
   };
 
   /** @return the executor context in our test class */
-  ExecutorContext *GetExecutorContext() { return exec_ctx_.get(); }
-  ExecutionEngine *GetExecutionEngine() { return execution_engine_.get(); }
-  Transaction *GetTxn() { return txn_; }
-  TransactionManager *GetTxnManager() { return txn_mgr_.get(); }
-  Catalog *GetCatalog() { return catalog_.get(); }
-  BufferPoolManager *GetBPM() { return bpm_.get(); }
-  LockManager *GetLockManager() { return lock_manager_.get(); }
+  auto GetExecutorContext() -> ExecutorContext * { return exec_ctx_.get(); }
+  auto GetExecutionEngine() -> ExecutionEngine * { return execution_engine_.get(); }
+  auto GetTxn() -> Transaction * { return txn_; }
+  auto GetTxnManager() -> TransactionManager * { return txn_mgr_.get(); }
+  auto GetCatalog() -> Catalog * { return catalog_.get(); }
+  auto GetBPM() -> BufferPoolManager * { return bpm_.get(); }
+  auto GetLockManager() -> LockManager * { return lock_manager_.get(); }
 
   // The below helper functions are useful for testing.
 
-  const AbstractExpression *MakeColumnValueExpression(const Schema &schema, uint32_t tuple_idx,
-                                                      const std::string &col_name) {
+  auto MakeColumnValueExpression(const Schema &schema, uint32_t tuple_idx, const std::string &col_name)
+      -> const AbstractExpression * {
     uint32_t col_idx = schema.GetColIdx(col_name);
     auto col_type = schema.GetColumn(col_idx).GetType();
     allocated_exprs_.emplace_back(std::make_unique<ColumnValueExpression>(tuple_idx, col_idx, col_type));
     return allocated_exprs_.back().get();
   }
 
-  const AbstractExpression *MakeConstantValueExpression(const Value &val) {
+  auto MakeConstantValueExpression(const Value &val) -> const AbstractExpression * {
     allocated_exprs_.emplace_back(std::make_unique<ConstantValueExpression>(val));
     return allocated_exprs_.back().get();
   }
 
-  const AbstractExpression *MakeComparisonExpression(const AbstractExpression *lhs, const AbstractExpression *rhs,
-                                                     ComparisonType comp_type) {
+  auto MakeComparisonExpression(const AbstractExpression *lhs, const AbstractExpression *rhs, ComparisonType comp_type)
+      -> const AbstractExpression * {
     allocated_exprs_.emplace_back(std::make_unique<ComparisonExpression>(lhs, rhs, comp_type));
     return allocated_exprs_.back().get();
   }
 
-  const AbstractExpression *MakeAggregateValueExpression(bool is_group_by_term, uint32_t term_idx) {
+  auto MakeAggregateValueExpression(bool is_group_by_term, uint32_t term_idx) -> const AbstractExpression * {
     allocated_exprs_.emplace_back(
         std::make_unique<AggregateValueExpression>(is_group_by_term, term_idx, TypeId::INTEGER));
     return allocated_exprs_.back().get();
   }
 
-  const Schema *MakeOutputSchema(const std::vector<std::pair<std::string, const AbstractExpression *>> &exprs) {
+  auto MakeOutputSchema(const std::vector<std::pair<std::string, const AbstractExpression *>> &exprs)
+      -> const Schema * {
     std::vector<Column> cols;
     cols.reserve(exprs.size());
     for (const auto &input : exprs) {
@@ -155,12 +162,8 @@ void CheckTxnLockSize(Transaction *txn, size_t shared_size, size_t exclusive_siz
   EXPECT_EQ(txn->GetExclusiveLockSet()->size(), exclusive_size);
 }
 
-/****************************
- * Rollback Tests (15 pts)
- ****************************/
-
 // NOLINTNEXTLINE
-TEST_F(GradingRollbackTest, SimpleInsertRollbackTest) {
+TEST_F(TransactionTest, SimpleInsertRollbackTest) {
   // txn1: INSERT INTO empty_table2 VALUES (200, 20), (201, 21), (202, 22)
   // txn1: abort
   // txn2: SELECT * FROM empty_table2;
@@ -174,9 +177,6 @@ TEST_F(GradingRollbackTest, SimpleInsertRollbackTest) {
   // Create insert plan node
   auto table_info = exec_ctx1->GetCatalog()->GetTable("empty_table2");
   InsertPlanNode insert_plan{std::move(raw_vals), table_info->oid_};
-
-  auto key_schema = ParseCreateStatement("a bigint");
-  GenericComparator<8> comparator(key_schema.get());
 
   GetExecutionEngine()->Execute(&insert_plan, nullptr, txn1, exec_ctx1.get());
   GetTxnManager()->Abort(txn1);
@@ -203,135 +203,55 @@ TEST_F(GradingRollbackTest, SimpleInsertRollbackTest) {
 }
 
 // NOLINTNEXTLINE
-TEST_F(GradingRollbackTest, SimpleDeleteRollbackTest) {
-  // txn1: DELETE FROM test_1 WHERE colA < 50
+TEST_F(TransactionTest, DirtyReadsTest) {
+  // txn1: INSERT INTO empty_table2 VALUES (200, 20), (201, 21), (202, 22)
+  // txn2: SELECT * FROM empty_table2;
   // txn1: abort
-  // txn2: SELECT colA FROM test_1 WHERE colA < 50
-
-  // Construct query plan
-  auto table_info = GetExecutorContext()->GetCatalog()->GetTable("test_1");
-  auto &schema = table_info->schema_;
-  auto col_a = MakeColumnValueExpression(schema, 0, "colA");
-  auto const50 = MakeConstantValueExpression(ValueFactory::GetIntegerValue(50));
-  auto predicate = MakeComparisonExpression(col_a, const50, ComparisonType::LessThan);
-  auto out_schema1 = MakeOutputSchema({{"colA", col_a}});
-  auto scan_plan1 = std::make_unique<SeqScanPlanNode>(out_schema1, predicate, table_info->oid_);
-  // index
-  auto key_schema = ParseCreateStatement("a bigint");
-  GenericComparator<8> comparator(key_schema.get());
-  auto index_info = GetExecutorContext()->GetCatalog()->CreateIndex<GenericKey<8>, RID, GenericComparator<8>>(
-      GetTxn(), "index1", "test_1", GetExecutorContext()->GetCatalog()->GetTable("test_1")->schema_, *key_schema, {0},
-      8, HashFunction<GenericKey<8>>{});
-
-  auto txn1 = GetTxnManager()->Begin();
+  auto txn1 = GetTxnManager()->Begin(nullptr, IsolationLevel::READ_UNCOMMITTED);
   auto exec_ctx1 = std::make_unique<ExecutorContext>(txn1, GetCatalog(), GetBPM(), GetTxnManager(), GetLockManager());
-  std::unique_ptr<AbstractPlanNode> delete_plan;
-  { delete_plan = std::make_unique<DeletePlanNode>(scan_plan1.get(), table_info->oid_); }
-  GetExecutionEngine()->Execute(delete_plan.get(), nullptr, txn1, exec_ctx1.get());
-  GetTxnManager()->Abort(txn1);
-  delete txn1;
+  // Create Values to insert
+  std::vector<Value> val1{ValueFactory::GetIntegerValue(200), ValueFactory::GetIntegerValue(20)};
+  std::vector<Value> val2{ValueFactory::GetIntegerValue(201), ValueFactory::GetIntegerValue(21)};
+  std::vector<Value> val3{ValueFactory::GetIntegerValue(202), ValueFactory::GetIntegerValue(22)};
+  std::vector<std::vector<Value>> raw_vals{val1, val2, val3};
+  // Create insert plan node
+  auto table_info = exec_ctx1->GetCatalog()->GetTable("empty_table2");
+  InsertPlanNode insert_plan{std::move(raw_vals), table_info->oid_};
 
-  auto txn2 = GetTxnManager()->Begin();
+  GetExecutionEngine()->Execute(&insert_plan, nullptr, txn1, exec_ctx1.get());
+
+  // Iterate through table to read the tuples.
+  auto txn2 = GetTxnManager()->Begin(nullptr, IsolationLevel::READ_UNCOMMITTED);
   auto exec_ctx2 = std::make_unique<ExecutorContext>(txn2, GetCatalog(), GetBPM(), GetTxnManager(), GetLockManager());
-  std::vector<Tuple> result_set;
-  GetExecutionEngine()->Execute(scan_plan1.get(), &result_set, txn2, exec_ctx2.get());
-
-  // Verify
-  for (const auto &tuple : result_set) {
-    ASSERT_TRUE(tuple.GetValue(out_schema1, out_schema1->GetColIdx("colA")).GetAs<int32_t>() < 50);
-  }
-  ASSERT_EQ(result_set.size(), 50);
-  Tuple index_key = Tuple(result_set[0]);
-
-  std::vector<RID> rids;
-
-  index_info->index_->ScanKey(index_key, &rids, txn2);
-  ASSERT_TRUE(!rids.empty());
-
-  GetTxnManager()->Commit(txn2);
-  delete txn2;
-}
-
-// NOLINTNEXTLINE
-TEST_F(GradingRollbackTest, SimpleUpdateRollbackTest) {
-  // txn1: INSERT INTO empty_table2 SELECT colA, colA FROM test_1 WHERE colA < 50
-  // txn2: UPDATE empty_table2 SET colA = colA+10 WHERE colA < 50
-  // txn2 abort
-  // txn3: SELECT colA FROM test_1 WHERE colA < 50
-  std::unique_ptr<AbstractPlanNode> scan_plan1;
-  const Schema *out_schema1;
-  {
-    auto table_info = GetExecutorContext()->GetCatalog()->GetTable("test_1");
-    auto &schema = table_info->schema_;
-    auto col_a = MakeColumnValueExpression(schema, 0, "colA");
-    auto const600 = MakeConstantValueExpression(ValueFactory::GetIntegerValue(50));
-    auto predicate = MakeComparisonExpression(col_a, const600, ComparisonType::LessThan);
-    out_schema1 = MakeOutputSchema({{"colA", col_a}, {"colA", col_a}});
-    scan_plan1 = std::make_unique<SeqScanPlanNode>(out_schema1, predicate, table_info->oid_);
-  }
-  std::unique_ptr<AbstractPlanNode> insert_plan;
-  {
-    auto table_info = GetExecutorContext()->GetCatalog()->GetTable("empty_table2");
-    insert_plan = std::make_unique<InsertPlanNode>(scan_plan1.get(), table_info->oid_);
-  }
-
-  auto txn1 = GetTxnManager()->Begin();
-  auto exec_ctx1 = std::make_unique<ExecutorContext>(txn1, GetCatalog(), GetBPM(), GetTxnManager(), GetLockManager());
-  GetExecutionEngine()->Execute(insert_plan.get(), nullptr, txn1, exec_ctx1.get());
-  GetTxnManager()->Commit(txn1);
-  delete txn1;
-
-  // Construct query plan
-  auto table_info = GetExecutorContext()->GetCatalog()->GetTable("empty_table2");
   auto &schema = table_info->schema_;
   auto col_a = MakeColumnValueExpression(schema, 0, "colA");
   auto col_b = MakeColumnValueExpression(schema, 0, "colB");
-  auto const50 = MakeConstantValueExpression(ValueFactory::GetIntegerValue(50));
-  auto predicate = MakeComparisonExpression(col_a, const50, ComparisonType::LessThan);
-  auto out_empty_schema = MakeOutputSchema({{"colA", col_a}, {"colB", col_b}});
-  auto scan_empty_plan = std::make_unique<SeqScanPlanNode>(out_empty_schema, predicate, table_info->oid_);
+  auto out_schema = MakeOutputSchema({{"colA", col_a}, {"colB", col_b}});
+  SeqScanPlanNode scan_plan{out_schema, nullptr, table_info->oid_};
 
-  // Create Indexes for col1 and col2
-  auto key_schema = ParseCreateStatement("a int");
-  GenericComparator<8> comparator(key_schema.get());
-  GetExecutorContext()->GetCatalog()->CreateIndex<GenericKey<8>, RID, GenericComparator<8>>(
-      GetTxn(), "index1", "empty_table2", GetExecutorContext()->GetCatalog()->GetTable("empty_table2")->schema_,
-      *key_schema, {0}, 8, HashFunction<GenericKey<8>>{});
-  auto index_info = GetExecutorContext()->GetCatalog()->CreateIndex<GenericKey<8>, RID, GenericComparator<8>>(
-      GetTxn(), "index2", "empty_table2", GetExecutorContext()->GetCatalog()->GetTable("empty_table2")->schema_,
-      *key_schema, {1}, 8, HashFunction<GenericKey<8>>{});
-
-  std::unordered_map<uint32_t, UpdateInfo> update_attrs;
-  update_attrs.insert(std::make_pair(0, UpdateInfo(UpdateType::Add, 10)));
-  std::unique_ptr<AbstractPlanNode> update_plan;
-  { update_plan = std::make_unique<UpdatePlanNode>(scan_empty_plan.get(), table_info->oid_, update_attrs); }
-
-  auto txn2 = GetTxnManager()->Begin();
-  auto exec_ctx2 = std::make_unique<ExecutorContext>(txn2, GetCatalog(), GetBPM(), GetTxnManager(), GetLockManager());
   std::vector<Tuple> result_set;
-  GetExecutionEngine()->Execute(update_plan.get(), &result_set, txn2, exec_ctx2.get());
-  GetTxnManager()->Abort(txn2);
+  GetExecutionEngine()->Execute(&scan_plan, &result_set, txn2, exec_ctx2.get());
+
+  GetTxnManager()->Abort(txn1);
+  delete txn1;
+
+  // First value
+  ASSERT_EQ(result_set[0].GetValue(out_schema, out_schema->GetColIdx("colA")).GetAs<int32_t>(), 200);
+  ASSERT_EQ(result_set[0].GetValue(out_schema, out_schema->GetColIdx("colB")).GetAs<int32_t>(), 20);
+
+  // Second value
+  ASSERT_EQ(result_set[1].GetValue(out_schema, out_schema->GetColIdx("colA")).GetAs<int32_t>(), 201);
+  ASSERT_EQ(result_set[1].GetValue(out_schema, out_schema->GetColIdx("colB")).GetAs<int32_t>(), 21);
+
+  // Third value
+  ASSERT_EQ(result_set[2].GetValue(out_schema, out_schema->GetColIdx("colA")).GetAs<int32_t>(), 202);
+  ASSERT_EQ(result_set[2].GetValue(out_schema, out_schema->GetColIdx("colB")).GetAs<int32_t>(), 22);
+
+  // Size
+  ASSERT_EQ(result_set.size(), 3);
+
+  GetTxnManager()->Commit(txn2);
   delete txn2;
-
-  auto txn3 = GetTxnManager()->Begin();
-  auto exec_ctx3 = std::make_unique<ExecutorContext>(txn3, GetCatalog(), GetBPM(), GetTxnManager(), GetLockManager());
-  result_set.clear();
-  GetExecutionEngine()->Execute(scan_plan1.get(), &result_set, txn3, exec_ctx3.get());
-
-  // Verify
-  for (const auto &tuple : result_set) {
-    ASSERT_TRUE(tuple.GetValue(out_schema1, out_schema1->GetColIdx("colA")).GetAs<int32_t>() < 50);
-  }
-  ASSERT_EQ(result_set.size(), 50);
-  Tuple index_key = Tuple(result_set[0]);
-
-  std::vector<RID> rids;
-
-  index_info->index_->ScanKey(index_key, &rids, txn3);
-  ASSERT_TRUE(!rids.empty());
-
-  GetTxnManager()->Commit(txn3);
-  delete txn3;
 }
 
 }  // namespace bustub
