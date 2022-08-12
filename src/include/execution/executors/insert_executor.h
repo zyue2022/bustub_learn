@@ -14,6 +14,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "execution/executor_context.h"
 #include "execution/executors/abstract_executor.h"
@@ -59,6 +60,15 @@ class InsertExecutor : public AbstractExecutor {
  private:
   /** The insert plan node to be executed*/
   const InsertPlanNode *plan_;
+
+  // 增加的成员变量
+  Catalog *catalog_;
+  TableInfo *table_info_;
+  std::vector<Tuple> insert_tuples_;
+  std::unique_ptr<AbstractExecutor> child_executor_;
+
+  // new add function for insert row into table with indexes.
+  void InsertIntoTableWithIndex(Tuple *tuple);
 };
 
 }  // namespace bustub
