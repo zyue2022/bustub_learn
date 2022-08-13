@@ -38,15 +38,36 @@ void InsertExecutor::InsertIntoTableWithIndex(Tuple *tuple) {
     throw Exception(ExceptionType::OUT_OF_MEMORY, "InsertExecutor:no enough space for this tuple.");
   }
 
+  // 插入后再加锁，有点小问题
+  // 锁
+  LockManager *locker = GetExecutorContext()->GetLockManager();
+  Transaction *txn = GetExecutorContext()->GetTransaction();
+  // 加锁，加写锁，如果原来是读锁就需要升级，检查到没有加写锁就需要加写锁
+  if (txn->IsSharedLocked(new_rid)) {
+    locker->LockUpgrade(txn, new_rid);
+  } else if (!txn->IsExclusiveLocked(new_rid)) {
+    locker->LockExclusive(txn, new_rid);
+  }
+
   // 索引更新
   for (auto &indexinfo : catalog_->GetTableIndexes(table_info_->name_)) {
+    // 增加索引
     indexinfo->index_->InsertEntry(tuple->KeyFromTuple(table_info_->schema_, *(indexinfo->index_->GetKeySchema()),
                                                        indexinfo->index_->GetKeyAttrs()),
                                    new_rid, exec_ctx_->GetTransaction());
+    // 同时在事务中记录下变更
+    txn->GetIndexWriteSet()->emplace_back(IndexWriteRecord(new_rid, table_info_->oid_, WType::INSERT, *tuple,
+                                                           indexinfo->index_oid_, exec_ctx_->GetCatalog()));
+  }
+
+  // 解锁，READ_UNCOMMITTED 和 READ_COMMITTED 写入完成后立刻释放 exclusive lock。
+  // REPEATABLE_READ 会在整个事务 commit 时统一 unlock，不需要我们自己编写代码
+  if (txn->GetIsolationLevel() != IsolationLevel::REPEATABLE_READ) {
+    locker->Unlock(txn, new_rid);
   }
 }
 
-// 有两种插入情况
+// 有两种插入情况，先将待插入的tuple保存到容器中
 bool InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) {
   if (plan_->IsRawInsert()) {
     // 原始插入

@@ -26,6 +26,10 @@ void DeleteExecutor::Init() {
 }
 
 bool DeleteExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) {
+  // 锁
+  LockManager *locker = GetExecutorContext()->GetLockManager();
+  Transaction *txn = GetExecutorContext()->GetTransaction();
+
   Tuple del_tuple;
   RID del_rid;
   while (true) {
@@ -39,14 +43,26 @@ bool DeleteExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) {
       return false;
     }
 
+    // 加锁，删除肯定是加写锁，如果原来是读锁就需要升级，检查到没有加写锁就需要加写锁
+    if (txn->IsSharedLocked(del_rid)) {
+      locker->LockUpgrade(txn, del_rid);
+    } else if (!txn->IsExclusiveLocked(del_rid)) {
+      locker->LockExclusive(txn, del_rid);
+    }
+
     // 根据子查询器的结果来调用TableHeap标记删除状态
     table_info_->table_->MarkDelete(del_rid, exec_ctx_->GetTransaction());
-
     // 还要删除索引
     for (const auto &indexinfo : exec_ctx_->GetCatalog()->GetTableIndexes(table_info_->name_)) {
       indexinfo->index_->DeleteEntry(del_tuple.KeyFromTuple(table_info_->schema_, *indexinfo->index_->GetKeySchema(),
                                                             indexinfo->index_->GetKeyAttrs()),
                                      del_rid, exec_ctx_->GetTransaction());
+    }
+
+    // 解锁，READ_UNCOMMITTED 和 READ_COMMITTED 写入完成后立刻释放 exclusive lock。
+    // REPEATABLE_READ 会在整个事务 commit 时统一 unlock，不需要我们自己编写代码
+    if (txn->GetIsolationLevel() != IsolationLevel::REPEATABLE_READ) {
+      locker->Unlock(txn, del_rid);
     }
   }
   return false;

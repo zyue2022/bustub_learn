@@ -31,6 +31,11 @@ bool SeqScanExecutor::Next(Tuple *tuple, RID *rid) {
 
   // 返回 RID 是为了能找到磁盘中的投影之前的原始数据
   if (iter_ != table_info_->table_->End()) {
+    // 加锁,如果不是 READ_UNCOMMITTED，读取均需要获取 shared lock
+    LockManager *locker = GetExecutorContext()->GetLockManager();
+    Transaction *txn = GetExecutorContext()->GetTransaction();
+    locker->LockShared(txn, iter_->GetRid());  // 这里会在LockShared函数判断是不是READ_UNCOMMITTED
+
     // 取出当前符合条件行的每一列数据
     std::vector<Value> values;
     for (size_t i = 0; i < GetOutputSchema()->GetColumnCount(); ++i) {
@@ -38,6 +43,11 @@ bool SeqScanExecutor::Next(Tuple *tuple, RID *rid) {
     }
     *tuple = Tuple(values, GetOutputSchema());
     *rid = iter_->GetRid();
+
+    // 解锁，如果是 READ_COMMITTED，读完后需要立刻释放 shared lock
+    if (txn->GetIsolationLevel() == IsolationLevel::READ_COMMITTED) {
+      locker->Unlock(txn, iter_->GetRid());
+    }
 
     ++iter_;
     return true;  // 返回true其上层引擎会继续调用

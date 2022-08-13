@@ -25,6 +25,10 @@ void UpdateExecutor::Init() {
 }
 
 bool UpdateExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) {
+  // 锁
+  LockManager *locker = GetExecutorContext()->GetLockManager();
+  Transaction *txn = GetExecutorContext()->GetTransaction();
+
   Tuple old_tuple;
   RID old_tuple_rid;
   while (true) {
@@ -38,9 +42,38 @@ bool UpdateExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) {
       return false;
     }
 
+    // 加锁，删除肯定是加写锁，如果原来是读锁就需要升级，检查到没有加写锁就需要加写锁
+    if (txn->IsSharedLocked(old_tuple_rid)) {
+      locker->LockUpgrade(txn, old_tuple_rid);
+    } else if (!txn->IsExclusiveLocked(old_tuple_rid)) {
+      locker->LockExclusive(txn, old_tuple_rid);
+    }
+
     // 更新记录
     Tuple new_tuple = GenerateUpdatedTuple(old_tuple);
     table_info_->table_->UpdateTuple(new_tuple, old_tuple_rid, exec_ctx_->GetTransaction());
+    // 更新索引
+    for (const auto &index : exec_ctx_->GetCatalog()->GetTableIndexes(table_info_->name_)) {
+      // 先删旧索引后增新索引
+      auto index_info = index->index_.get();
+      index_info->DeleteEntry(
+          old_tuple.KeyFromTuple(table_info_->schema_, *index_info->GetKeySchema(), index_info->GetKeyAttrs()),
+          old_tuple_rid, exec_ctx_->GetTransaction());
+      index_info->InsertEntry(
+          new_tuple.KeyFromTuple(table_info_->schema_, *index_info->GetKeySchema(), index_info->GetKeyAttrs()),
+          old_tuple_rid, exec_ctx_->GetTransaction());
+      // 在事务中记录下变更
+      IndexWriteRecord write_record(old_tuple_rid, table_info_->oid_, WType::DELETE, new_tuple, index->index_oid_,
+                                    exec_ctx_->GetCatalog());
+      write_record.old_tuple_ = old_tuple;
+      txn->GetIndexWriteSet()->emplace_back(write_record);
+    }
+
+    // 解锁，READ_UNCOMMITTED 和 READ_COMMITTED 写入完成后立刻释放 exclusive lock。
+    // REPEATABLE_READ 会在整个事务 commit 时统一 unlock，不需要我们自己编写代码
+    if (txn->GetIsolationLevel() != IsolationLevel::REPEATABLE_READ) {
+      locker->Unlock(txn, old_tuple_rid);
+    }
   }
   return false;
 }

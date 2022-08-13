@@ -35,42 +35,25 @@ class TransactionManager;
 class LockManager {
   enum class LockMode { SHARED, EXCLUSIVE };
 
-  enum class RIDStatus { FREE, SHARED, EXCLUSIVE };
-
-  enum class KillType { ALL_REQUEST, WRITE_REQUEST };
-
-  static const txn_id_t MAX_ID = 0x0fffffff;
-
   class LockRequest {
    public:
-    LockRequest(Transaction *txn, LockMode lock_mode)
-        : transation_(txn), txn_id_(txn->GetTransactionId()), lock_mode_(lock_mode), granted_{false} {}
-    Transaction *transation_;
+    LockRequest(txn_id_t txn_id, LockMode lock_mode) : txn_id_(txn_id), lock_mode_(lock_mode), granted_(false) {}
+    LockRequest(txn_id_t txn_id, LockMode lock_mode, bool granted)
+        : txn_id_(txn_id), lock_mode_(lock_mode), granted_(granted) {}
+
     txn_id_t txn_id_;
     LockMode lock_mode_;
     bool granted_;
   };
 
   class LockRequestQueue {
-    // 重载map的key值排序方式
-    struct SetpComparator {
-      bool operator()(const LockRequest &lhs, const LockRequest &rhs) const { return lhs.txn_id_ < rhs.txn_id_; }
-    };
    public:
     std::list<LockRequest> request_queue_;
     // for notifying blocked transactions on this rid
     std::condition_variable cv_;
     // txn_id of an upgrading transaction (if any)
     txn_id_t upgrading_ = INVALID_TXN_ID;
-
-    int share_req_cnt_{0};  // 当前持有S锁的事务个数
-
-    RIDStatus status_;  // 当前RID上的锁
   };
-
-  // 辅助函数
-  void KillRequest(txn_id_t id, const RID &rid, KillType type);
-  void AwakeSharedRequest(const RID &rid);
 
  public:
   /**
