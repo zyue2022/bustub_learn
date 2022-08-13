@@ -62,6 +62,7 @@ check:
         lock_table_[rid].cv_.wait(ul);
         goto check;  // 等待到获取锁后还需要重新判断
       } else {
+        // 跳过持有读锁的老或新事务
         ++it;
       }
     }
@@ -89,14 +90,19 @@ bool LockManager::LockExclusive(Transaction *txn, const RID &rid) {
     txn->SetState(TransactionState::ABORTED);
     return false;
   }
+  if (txn->IsSharedLocked(rid)) {
+    return false;
+  }
   if (txn->IsExclusiveLocked(rid)) {
     return true;
   }
 
   if (lock_table_.count(rid) > 0) {
     auto it = lock_table_[rid].request_queue_.begin();
+    // 先将全部新事务abort完
     while (it != lock_table_[rid].request_queue_.end()) {
-      Transaction *cur_trans = TransactionManager::GetTransaction(it->txn_id_);  // cur是当前遍历到的事务
+      // cur是当前在队列遍历到的事务
+      Transaction *cur_trans = TransactionManager::GetTransaction(it->txn_id_);
       if (it->txn_id_ > txn->GetTransactionId()) {
         // 当前是新事务，txn是老事务，abort掉新事务
         cur_trans->SetState(TransactionState::ABORTED);
@@ -106,13 +112,18 @@ bool LockManager::LockExclusive(Transaction *txn, const RID &rid) {
           cur_trans->GetExclusiveLockSet()->erase(rid);
         }
         it = lock_table_[rid].request_queue_.erase(it);
-      } else if (it->txn_id_ < txn->GetTransactionId()) {
+      }
+      ++it;
+    }
+    it = lock_table_[rid].request_queue_.begin();
+    // 遍历剩下的老事务
+    while (it != lock_table_[rid].request_queue_.end()) {
+      if (it->txn_id_ < txn->GetTransactionId()) {
         // 当前是老事务，txn是想获取写锁的新事务，不能和老事务共存，txn自己被abort
         txn->SetState(TransactionState::ABORTED);
         return false;
-      } else {
-        ++it;
       }
+      ++it;
     }
   }
 
@@ -197,7 +208,6 @@ bool LockManager::Unlock(Transaction *txn, const RID &rid) {
   }
 
   auto it = lock_table_[rid].request_queue_.begin();
-  bool ret = false;
   while (it != lock_table_[rid].request_queue_.end()) {
     if (it->txn_id_ == txn->GetTransactionId()) {
       // 找到已经持有锁的txn，其在队列的位置
@@ -211,12 +221,11 @@ bool LockManager::Unlock(Transaction *txn, const RID &rid) {
       }
       it->granted_ = false;  // 感觉 granted_ 并未用到
       it = lock_table_[rid].request_queue_.erase(it);
-      // return true;
-      ret = true;
+      return true;
     }
     ++it;
   }
-  return ret;
+  return false;
 }
 
 }  // namespace bustub
