@@ -39,7 +39,6 @@ void InsertExecutor::InsertIntoTableWithIndex(Tuple *tuple) {
   }
 
   // 插入后再加锁，有点小问题
-  // 锁
   LockManager *locker = GetExecutorContext()->GetLockManager();
   Transaction *txn = GetExecutorContext()->GetTransaction();
   // 加锁，加写锁，如果原来是读锁就需要升级，检查到没有加写锁就需要加写锁
@@ -55,7 +54,7 @@ void InsertExecutor::InsertIntoTableWithIndex(Tuple *tuple) {
     indexinfo->index_->InsertEntry(tuple->KeyFromTuple(table_info_->schema_, *(indexinfo->index_->GetKeySchema()),
                                                        indexinfo->index_->GetKeyAttrs()),
                                    new_rid, exec_ctx_->GetTransaction());
-    // 同时在事务中记录下变更
+    // 同时记录事务变更
     txn->GetIndexWriteSet()->emplace_back(IndexWriteRecord(new_rid, table_info_->oid_, WType::INSERT, *tuple,
                                                            indexinfo->index_oid_, exec_ctx_->GetCatalog()));
   }
@@ -67,7 +66,11 @@ void InsertExecutor::InsertIntoTableWithIndex(Tuple *tuple) {
   }
 }
 
-// 有两种插入情况，先将待插入的tuple保存到容器中
+/**
+ * @description: 有两种插入情况，先将待插入的tuple保存到容器中
+ * @param {[[maybe_unused]] Tuple} *tuple
+ * @param {RID} *rid
+ */
 bool InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) {
   if (plan_->IsRawInsert()) {
     // 原始插入
@@ -75,6 +78,7 @@ bool InsertExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) {
       insert_tuples_.emplace_back(Tuple(row_value, &table_info_->schema_));
     }
   } else {
+    // 有嵌套
     child_executor_->Init();
     try {
       Tuple tuple;

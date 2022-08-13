@@ -52,11 +52,15 @@ bool DeleteExecutor::Next([[maybe_unused]] Tuple *tuple, RID *rid) {
 
     // 根据子查询器的结果来调用TableHeap标记删除状态
     table_info_->table_->MarkDelete(del_rid, exec_ctx_->GetTransaction());
-    // 还要删除索引
+    // 更新索引
     for (const auto &indexinfo : exec_ctx_->GetCatalog()->GetTableIndexes(table_info_->name_)) {
+      // 删除索引
       indexinfo->index_->DeleteEntry(del_tuple.KeyFromTuple(table_info_->schema_, *indexinfo->index_->GetKeySchema(),
                                                             indexinfo->index_->GetKeyAttrs()),
                                      del_rid, exec_ctx_->GetTransaction());
+      // 记录事务变更
+      txn->GetIndexWriteSet()->emplace_back(IndexWriteRecord(del_rid, table_info_->oid_, WType::DELETE, del_tuple,
+                                                             indexinfo->index_oid_, exec_ctx_->GetCatalog()));
     }
 
     // 解锁，READ_UNCOMMITTED 和 READ_COMMITTED 写入完成后立刻释放 exclusive lock。

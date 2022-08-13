@@ -24,8 +24,22 @@ void SeqScanExecutor::Init() {
 
 bool SeqScanExecutor::Next(Tuple *tuple, RID *rid) {
   // 如果条件存在，就跳过不符合条件的行
-  while (iter_ != table_info_->table_->End() && plan_->GetPredicate() != nullptr &&
-         !plan_->GetPredicate()->Evaluate(&(*iter_), &(table_info_->schema_)).GetAs<bool>()) {
+  while (iter_ != table_info_->table_->End() && plan_->GetPredicate() != nullptr) {
+    // 加锁,如果不是 READ_UNCOMMITTED，读取均需要获取 shared lock
+    LockManager *locker = GetExecutorContext()->GetLockManager();
+    Transaction *txn = GetExecutorContext()->GetTransaction();
+    locker->LockShared(txn, iter_->GetRid());  // 这里会在LockShared函数判断是不是READ_UNCOMMITTED
+
+    bool is_valid = plan_->GetPredicate()->Evaluate(&(*iter_), &(table_info_->schema_)).GetAs<bool>();
+
+    // 解锁，如果是 READ_COMMITTED，读完后需要立刻释放 shared lock
+    if (txn->GetIsolationLevel() == IsolationLevel::READ_COMMITTED) {
+      locker->Unlock(txn, iter_->GetRid());
+    }
+
+    if (is_valid) {
+      break;
+    }
     ++iter_;
   }
 
